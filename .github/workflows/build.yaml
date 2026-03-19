@@ -1,0 +1,100 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docker/**'
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      images: ${{ steps.detect.outputs.images }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+
+      - name: Detect changed images
+        id: detect
+        run: | # shell
+          CHANGED=$(git diff --name-only HEAD~1 HEAD -- docker/ \
+            | grep -oP 'docker/\K[^/]+' \
+            | sort -u \
+            | jq -R . | jq -sc .)
+          echo "images=${CHANGED}" >> $GITHUB_OUTPUT
+
+  build:
+    needs: detect
+    if: needs.detect.outputs.images != '[]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ${{ fromJson(needs.detect.outputs.images) }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Get upstream info
+        id: upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: | # shell
+          REPO=$(grep -oP '(?<=upstream-repo=)[^\s"\\]+' docker/${{ matrix.image }}/Dockerfile | head -1)
+          TAG=$(gh release view --repo "$REPO" --json tagName -q .tagName 2>/dev/null || echo "")
+          DEFAULT_BRANCH=$(gh api "repos/${REPO}" --jq '.default_branch' 2>/dev/null || echo "main")
+          SHA=$(gh api "repos/${REPO}/commits/${DEFAULT_BRANCH}" --jq '.sha' 2>/dev/null \
+            | grep -E '^[0-9a-f]{40}$' | cut -c1-7 || echo "")
+          IMAGE_PREFIX=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "repo=${REPO}" >> $GITHUB_OUTPUT
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "default_branch=${DEFAULT_BRANCH}" >> $GITHUB_OUTPUT
+          echo "sha=${SHA}" >> $GITHUB_OUTPUT
+          echo "image_prefix=${IMAGE_PREFIX}" >> $GITHUB_OUTPUT
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push (release)
+        if: steps.upstream.outputs.tag != ''
+        uses: docker/build-push-action@v7
+        with:
+          context: docker/${{ matrix.image }}
+          push: true
+          build-args: | # shell
+            UPSTREAM_VERSION=${{ steps.upstream.outputs.tag }}
+            UPSTREAM_SHA=${{ steps.upstream.outputs.sha }}
+          tags: | # shell
+            ${{ env.REGISTRY }}/${{ steps.upstream.outputs.image_prefix }}/${{ matrix.image }}:${{ steps.upstream.outputs.tag }}-${{ steps.upstream.outputs.sha }}
+            ${{ env.REGISTRY }}/${{ steps.upstream.outputs.image_prefix }}/${{ matrix.image }}:latest
+          labels: | # shell
+            org.opencontainers.image.version=${{ steps.upstream.outputs.tag }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      - name: Build and push (edge)
+        uses: docker/build-push-action@v7
+        with:
+          context: docker/${{ matrix.image }}
+          push: true
+          build-args: | # shell
+            UPSTREAM_VERSION=${{ steps.upstream.outputs.default_branch }}
+            UPSTREAM_SHA=${{ steps.upstream.outputs.sha }}
+          tags: | # shell
+            ${{ env.REGISTRY }}/${{ steps.upstream.outputs.image_prefix }}/${{ matrix.image }}:main-${{ steps.upstream.outputs.sha }}
+            ${{ env.REGISTRY }}/${{ steps.upstream.outputs.image_prefix }}/${{ matrix.image }}:edge
+          labels: | # shell
+            org.opencontainers.image.version=main@${{ steps.upstream.outputs.sha }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
