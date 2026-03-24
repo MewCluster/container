@@ -4,20 +4,30 @@
 
 ## 镜像标签
 
-每个镜像同时维护两条构建线：
+每个正式镜像同时维护两条构建线，并提供独立的分支/PR测试标签：
 
 | 标签              | 示例             | 含义                                  |
 | ----------------- | ---------------- | ------------------------------------- |
 | `<release>-<sha>` | `v2.1.3-abc1f3d` | 跟随上游 release，sha 为本仓库 commit |
 | `latest`          | `latest`         | 始终指向最新 release 构建             |
-| `main-<sha>`      | `master-abc1f3d` | 跟随上游默认分支，sha 为上游 commit   |
+| `main-<sha>`      | `main-abc1f3d`   | 跟随上游默认分支，sha 为上游 commit，无论上游默认分支为何此处都为 main   |
 | `edge`            | `edge`           | 始终指向最新默认分支构建              |
+| `pr-<number>`     | `pr-12`          | (测试) 始终指向该 PR 的最新构建          |
+| `<branch-name>`   | `feat-new-app`   | (测试) 始终指向该分支的最新构建 (含字符安全过滤) |
+| `sha-<hash>`      | `sha-abc1f3d`    | (测试) 分支/PR 测试构建绑定的短 SHA 标签 |
 
-生产环境建议使用 `<release>-<sha>`，测试环境可使用 `edge`。
+生产环境建议使用 `<release>-<sha>`，正式环境测试可使用 `edge`，开发调试拉取 `<branch-name>` 或 `pr-<number>`。
 
 ## 添加新镜像
 
-在 `docker/` 下新建目录，添加 Dockerfile。模板如下：
+在 `docker/` 下新建目录，添加 `Dockerfile`。
+
+### 多变体支持
+CI 支持在同一个目录下放置多个变体 Dockerfile，通过不同的文件名自动生成对应的镜像标签：
+- 默认：`docker/apps/Dockerfile` -> 构建为 `ghcr.io/mewcluster/apps:latest` (及对应的版本号 tags)
+- 变体：`docker/apps/python-11.3.Dockerfile` -> 构建为 `ghcr.io/mewcluster/apps:latest-python-11.3` (所有的基础 tags 会自动在末尾追加 `-python-11.3` 后缀，例如 `v1.2.3-python-11.3`)
+
+### Dockerfile 模板
 
 ```dockerfile
 FROM ...
@@ -38,5 +48,6 @@ RUN git clone --depth=1 --branch ${UPSTREAM_VERSION} https://github.com/owner/re
 
 ## 构建触发
 
-- **每日构建**：自动检测所有镜像的上游是否有新 release 或新默认分支 commit，有变化则触发构建
-- **main 分支更新**：检测 `docker/` 下有变动的目录，自动构建新镜像
+- **每日构建**：自动检测所有 Dockerfile 标注的 `upstream-repo` 是否有新 release 或新 commit，有变化则触发正式构建
+- **main 分支推送**：检测 `docker/` 下有变动的 `*Dockerfile`，自动构建正式版新镜像
+- **非 main 分支或 PR 推送**：拦截进入测试构建通道，推送带有分支特性前缀的临时测试镜像，不覆盖 `latest` 和 `edge`

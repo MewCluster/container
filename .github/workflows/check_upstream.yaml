@@ -8,88 +8,144 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+
     permissions:
-      contents: write
+      actions: write
       packages: read
+
     steps:
       - uses: actions/checkout@v5
 
-      - name: Configure git
-        run: | # shell
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
       - name: Check all upstreams and trigger builds
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ORG: ${{ github.repository_owner }}
         run: | # shell
+          set -euo pipefail
+
+          TMP_FILE="/tmp/updated_images.jsonl"
+          rm -f "$TMP_FILE"
+
           CHANGED=false
 
-          for DIR in docker/*/; do
+          echo "🔍 Scanning Dockerfiles..."
+
+          while read -r DOCKERFILE; do
+            DIR=$(dirname "$DOCKERFILE")
+            FILENAME=$(basename "$DOCKERFILE")
             IMAGE=$(basename "$DIR")
-            DOCKERFILE="${DIR}Dockerfile"
 
-            if [ ! -f "$DOCKERFILE" ]; then
-              echo "::warning::${IMAGE}: Dockerfile not found, skipping"
-              continue
+            if [ "$FILENAME" = "Dockerfile" ]; then
+              VARIANT="latest"
+              TAG_SUFFIX=""
+            else
+              VARIANT=${FILENAME%.Dockerfile}
+              TAG_SUFFIX="-${VARIANT}"
             fi
 
-            # 从 Dockerfile 读取上游仓库（约定：LABEL upstream-repo=owner/repo）
-            REPO=$(grep -oP '(?<=upstream-repo=)[^\s"\\]+' "$DOCKERFILE" | head -1 || echo "")
+            REPO=$(grep -oP '(?<=upstream-repo=)[^\s"\\]+' "$DOCKERFILE" | head -1 || true)
+
             if [ -z "$REPO" ]; then
-              echo "::warning::${IMAGE}: no upstream-repo label in Dockerfile, skipping"
+              echo "::warning::${IMAGE}(${VARIANT}): no upstream-repo label, skipping"
               continue
             fi
 
-            echo "--- Checking ${IMAGE} (${REPO}) ---"
+            echo ""
+            echo "=== ${IMAGE} (${VARIANT}) ==="
+            echo "Upstream: $REPO"
 
-            # 获取上游默认分支
             DEFAULT_BRANCH=$(gh api "repos/${REPO}" --jq '.default_branch' 2>/dev/null || echo "main")
 
-            # 获取上游最新 release tag
-            NEW_RELEASE=$(gh release view --repo "$REPO" --json tagName -q .tagName 2>/dev/null || echo "")
+            NEW_RELEASE=$(gh release view --repo "$REPO" --json tagName -q .tagName 2>/dev/null || true)
 
-            # 获取上游默认分支最新 SHA（前 7 位），验证返回值为合法 40 位 SHA 再截取
             NEW_SHA=$(gh api "repos/${REPO}/commits/${DEFAULT_BRANCH}" --jq '.sha' 2>/dev/null \
-              | grep -E '^[0-9a-f]{40}$' | cut -c1-7 || echo "")
+              | grep -E '^[0-9a-f]{40}$' | cut -c1-7 || true)
+
+            echo "Default branch: $DEFAULT_BRANCH"
+            echo "Latest release: ${NEW_RELEASE:-<none>}"
+            echo "Latest sha: ${NEW_SHA:-<none>}"
 
             UPDATED=false
 
-            # 查 GHCR 是否已存在该 release 的任意 r<N> tag
-            if [ -n "$NEW_RELEASE" ]; then
+            # =========================
+            # release 检查
+            # =========================
+            if [ -n "${NEW_RELEASE:-}" ] && [ -n "${NEW_SHA:-}" ]; then
               EXISTING=$(gh api "/orgs/${ORG}/packages/container/${IMAGE}/versions" \
                 --jq '.[].metadata.container.tags[]' 2>/dev/null \
-                | grep -c "^${NEW_RELEASE}-" || true)
+                | grep -cxF "${NEW_RELEASE}-${NEW_SHA}${TAG_SUFFIX}" || true)
+
               if [ "$EXISTING" = "0" ]; then
-                echo "${IMAGE}: new release ${NEW_RELEASE}"
+                echo "🆕 New release detected: ${NEW_RELEASE}"
                 UPDATED=true
               fi
             fi
 
-            # 查 GHCR 是否已存在该 sha 的 <branch>-* tag
-            if [ -n "$NEW_SHA" ]; then
+            # =========================
+            # main / edge 检查
+            # =========================
+            if [ "$UPDATED" = "false" ] && [ -n "${NEW_SHA:-}" ]; then
               EXISTING=$(gh api "/orgs/${ORG}/packages/container/${IMAGE}/versions" \
                 --jq '.[].metadata.container.tags[]' 2>/dev/null \
-                | grep -c "^main-${NEW_SHA}$" || true)
+                | grep -cxF "main-${NEW_SHA}${TAG_SUFFIX}" || true)
+
               if [ "$EXISTING" = "0" ]; then
-                echo "${IMAGE}: new ${DEFAULT_BRANCH} sha ${NEW_SHA}"
+                echo "🆕 New commit detected: ${NEW_SHA}"
                 UPDATED=true
               fi
             fi
 
+            # =========================
+            # 记录变更
+            # =========================
             if [ "$UPDATED" = "true" ]; then
-              touch "$DOCKERFILE"
-              git add "$DOCKERFILE"
+              jq -n \
+                --arg ctx "$DIR" \
+                --arg file "$DOCKERFILE" \
+                --arg img "$IMAGE" \
+                --arg var "$VARIANT" \
+                '{context: $ctx, file: $file, image: $img, variant: $var}' \
+                >> "$TMP_FILE"
+
               CHANGED=true
             else
-              echo "${IMAGE}: up to date"
+              echo "✅ Up to date"
             fi
-          done
 
-          if [ "$CHANGED" = "true" ]; then
-            git commit -m "chore: upstream update $(date -u +%Y-%m-%d)"
-            git push
+          done < <(find docker/ -mindepth 2 -maxdepth 2 -name "*Dockerfile")
+
+          echo ""
+          echo "=============================="
+
+          # =========================
+          # 构建 matrix
+          # =========================
+
+          if [ ! -f "$TMP_FILE" ]; then
+            echo "No updates found (no JSONL file)"
+            MATRIX="[]"
           else
-            echo "All images up to date, nothing to push"
+            MATRIX=$(jq -sc . "$TMP_FILE" 2>/dev/null || echo "[]")
           fi
+
+          # 兜底（防 null / 空）
+          if [ -z "${MATRIX:-}" ] || [ "$MATRIX" = "null" ]; then
+            MATRIX="[]"
+          fi
+
+          echo "Final matrix:"
+          echo "$MATRIX"
+
+          # =========================
+          # 是否触发 build
+          # =========================
+
+          if [ "$MATRIX" = "[]" ]; then
+            echo "🎉 All images up to date, nothing to trigger"
+            exit 0
+          fi
+
+          echo "🚀 Triggering build.yaml..."
+
+          gh workflow run build.yaml -f matrix_json="$MATRIX" -f is_bot=true

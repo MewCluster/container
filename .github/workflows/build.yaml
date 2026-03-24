@@ -2,18 +2,40 @@ name: Build
 
 on:
   push:
-    branches: [main]
+    branches:
+      - '**'
     paths:
       - 'docker/**'
+  pull_request:
+    paths:
+      - 'docker/**'
+  workflow_dispatch:
+    inputs:
+      matrix_json:
+        description: 'JSON matrix of images to build'
+        required: true
+        type: string
+      is_bot:
+        description: 'Internal use only (for script triggers)'
+        required: false
+        type: boolean
+        default: false
 
 env:
   REGISTRY: ghcr.io
 
 jobs:
   detect:
+
+    if: >- # shell
+      github.event_name != 'workflow_dispatch' ||
+      github.ref != 'refs/heads/main' ||
+      inputs.is_bot == true
+
     runs-on: ubuntu-latest
     outputs:
-      images: ${{ steps.detect.outputs.images }}
+      matrix: ${{ steps.detect.outputs.matrix }}
+
     steps:
       - uses: actions/checkout@v5
         with:
@@ -21,43 +43,166 @@ jobs:
 
       - name: Detect changed images
         id: detect
+        env:
+          RAW_MATRIX: ${{ inputs.matrix_json }}
+          BEFORE_SHA: ${{ github.event.before }}
         run: | # shell
-          CHANGED=$(git diff --name-only HEAD~1 HEAD -- docker/ \
-            | grep -oP 'docker/\K[^/]+' \
-            | sort -u \
-            | jq -R . | jq -sc .)
-          echo "images=${CHANGED}" >> $GITHUB_OUTPUT
+          set -euo pipefail
+
+          echo "Event: ${{ github.event_name }}"
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            MATRIX="$RAW_MATRIX"
+          else
+            if [ "${{ github.event_name }}" = "pull_request" ]; then
+              BASE="${{ github.event.pull_request.base.sha }}"
+            else
+              if [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ] || [ -z "$BEFORE_SHA" ]; then
+                BASE="HEAD~1"
+              else
+                BASE="$BEFORE_SHA"
+              fi
+            fi
+
+            echo "Base: $BASE"
+
+            if ! git rev-parse "$BASE" >/dev/null 2>&1; then
+              echo "⚠️ Base $BASE not found, falling back to current commit changes"
+              FILES=$(git diff --name-only HEAD^ HEAD -- docker/ | grep -E 'Dockerfile$' || true)
+            else
+              FILES=$(git diff --name-only "$BASE" HEAD -- docker/ | grep -E 'Dockerfile$' || true)
+            fi
+
+            if [ -z "$FILES" ]; then
+              MATRIX="[]"
+            else
+              MATRIX=$(echo "$FILES" | sort -u | while read -r filepath; do
+                dir=$(dirname "$filepath")
+                filename=$(basename "$filepath")
+                base_dir=$(basename "$dir")
+
+                if [ "$filename" = "Dockerfile" ]; then
+                  variant="latest"
+                else
+                  variant="${filename%.Dockerfile}"
+                fi
+
+                jq -n \
+                  --arg ctx "$dir" \
+                  --arg file "$filepath" \
+                  --arg img "$base_dir" \
+                  --arg var "$variant" \
+                  '{context: $ctx, file: $file, image: $img, variant: $var, name: $name}'
+              done | jq -sc .)
+            fi
+          fi
+
+          if [ -z "${MATRIX:-}" ] || [ "$MATRIX" = "null" ]; then
+            MATRIX="[]"
+          fi
+
+          echo "Matrix: $MATRIX"
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
 
   build:
     needs: detect
-    if: needs.detect.outputs.images != '[]'
+
+    if: needs.detect.outputs.matrix && needs.detect.outputs.matrix != '[]'
+
     runs-on: ubuntu-latest
+
     permissions:
       contents: read
       packages: write
+
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.ref }}-${{ matrix.image }}-${{ matrix.variant }}
+      cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+    name: ${{ inputs.is_bot == true && '🤖' || '🔨' }} ${{ matrix.name }}
+
     strategy:
       fail-fast: false
       matrix:
-        image: ${{ fromJson(needs.detect.outputs.images) }}
+        include: ${{ fromJson(needs.detect.outputs.matrix) }}
+
     steps:
       - uses: actions/checkout@v5
+
+      - name: Debug matrix
+        run: | # shell
+          set -euo pipefail
+          echo "Full matrix:"
+          echo '${{ needs.detect.outputs.matrix }}'
+          echo ""
+          echo "Current item:"
+          echo '${{ toJson(matrix) }}'
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Get upstream info
         id: upstream
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: | # shell
-          REPO=$(grep -oP '(?<=upstream-repo=)[^\s"\\]+' docker/${{ matrix.image }}/Dockerfile | head -1)
-          TAG=$(gh release view --repo "$REPO" --json tagName -q .tagName 2>/dev/null || echo "")
+          set -euo pipefail
+
+          FILE="${{ matrix.file }}"
+
+          REPO=$(grep -oP '(?<=upstream-repo=)[^\s"\\]+' "$FILE" | head -1 || true)
+
+          if [ -z "${REPO:-}" ]; then
+            echo "❌ No upstream-repo in $FILE"
+            exit 1
+          fi
+
           DEFAULT_BRANCH=$(gh api "repos/${REPO}" --jq '.default_branch' 2>/dev/null || echo "main")
+
+          TAG=$(gh release view --repo "$REPO" --json tagName -q .tagName 2>/dev/null || true)
+
           SHA=$(gh api "repos/${REPO}/commits/${DEFAULT_BRANCH}" --jq '.sha' 2>/dev/null \
-            | grep -E '^[0-9a-f]{40}$' | cut -c1-7 || echo "")
+            | grep -E '^[0-9a-f]{40}$' | cut -c1-7 || true)
+
           IMAGE_PREFIX=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          echo "repo=${REPO}" >> $GITHUB_OUTPUT
-          echo "tag=${TAG}" >> $GITHUB_OUTPUT
-          echo "default_branch=${DEFAULT_BRANCH}" >> $GITHUB_OUTPUT
-          echo "sha=${SHA}" >> $GITHUB_OUTPUT
-          echo "image_prefix=${IMAGE_PREFIX}" >> $GITHUB_OUTPUT
+
+          echo "repo=$REPO" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "default_branch=$DEFAULT_BRANCH" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "image_prefix=$IMAGE_PREFIX" >> "$GITHUB_OUTPUT"
+
+      - name: Docker meta
+        id: meta
+        if: github.ref != 'refs/heads/main'
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ steps.upstream.outputs.image_prefix }}/${{ matrix.image }}
+          flavor: | # shell
+            suffix=${{ matrix.variant != 'latest' && format('-{0}', matrix.variant) || '' }}
+            latest=false
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,format=short,prefix=sha-
+
+      - name: Generate production tags
+        id: prod-tags
+        if: github.ref == 'refs/heads/main'
+        run: | # shell
+          set -euo pipefail
+
+          if [ "${{ matrix.variant }}" = "latest" ]; then
+            SUFFIX=""
+          else
+            SUFFIX="-${{ matrix.variant }}"
+          fi
+
+          echo "release_base=${{ steps.upstream.outputs.tag }}-${{ steps.upstream.outputs.sha }}${SUFFIX}" >> "$GITHUB_OUTPUT"
+          echo "latest_base=latest${SUFFIX}" >> "$GITHUB_OUTPUT"
+          echo "edge_base=edge${SUFFIX}" >> "$GITHUB_OUTPUT"
+          echo "main_base=main-${{ steps.upstream.outputs.sha }}${SUFFIX}" >> "$GITHUB_OUTPUT"
+          echo "cache_ref=cache${SUFFIX}" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
         uses: docker/login-action@v4
@@ -66,35 +211,53 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # =========================
+      # 🚀 main
+      # =========================
       - name: Build and push (release)
-        if: steps.upstream.outputs.tag != ''
+        if: github.ref == 'refs/heads/main' && steps.upstream.outputs.tag != ''
         uses: docker/build-push-action@v7
         with:
-          context: docker/${{ matrix.image }}
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
           push: true
-          build-args: | # shell
+          build-args: |
             UPSTREAM_VERSION=${{ steps.upstream.outputs.tag }}
             UPSTREAM_SHA=${{ steps.upstream.outputs.sha }}
-          tags: | # shell
-            ${{ env.REGISTRY }}/${{ steps.upstream.outputs.image_prefix }}/${{ matrix.image }}:${{ steps.upstream.outputs.tag }}-${{ steps.upstream.outputs.sha }}
-            ${{ env.REGISTRY }}/${{ steps.upstream.outputs.image_prefix }}/${{ matrix.image }}:latest
-          labels: | # shell
-            org.opencontainers.image.version=${{ steps.upstream.outputs.tag }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ steps.upstream.outputs.image_prefix }}/${{ matrix.image }}:${{ steps.prod-tags.outputs.release_base }}
+            ${{ env.REGISTRY }}/${{ steps.upstream.outputs.image_prefix }}/${{ matrix.image }}:${{ steps.prod-tags.outputs.latest_base }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ steps.upstream.outputs.image_prefix }}/${{ matrix.image }}:${{ steps.prod-tags.outputs.cache_ref }}
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ steps.upstream.outputs.image_prefix }}/${{ matrix.image }}:${{ steps.prod-tags.outputs.cache_ref }},mode=max
 
       - name: Build and push (edge)
+        if: github.ref == 'refs/heads/main'
         uses: docker/build-push-action@v7
         with:
-          context: docker/${{ matrix.image }}
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
           push: true
-          build-args: | # shell
+          build-args: |
             UPSTREAM_VERSION=${{ steps.upstream.outputs.default_branch }}
             UPSTREAM_SHA=${{ steps.upstream.outputs.sha }}
-          tags: | # shell
-            ${{ env.REGISTRY }}/${{ steps.upstream.outputs.image_prefix }}/${{ matrix.image }}:main-${{ steps.upstream.outputs.sha }}
-            ${{ env.REGISTRY }}/${{ steps.upstream.outputs.image_prefix }}/${{ matrix.image }}:edge
-          labels: | # shell
-            org.opencontainers.image.version=main@${{ steps.upstream.outputs.sha }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ steps.upstream.outputs.image_prefix }}/${{ matrix.image }}:${{ steps.prod-tags.outputs.main_base }}
+            ${{ env.REGISTRY }}/${{ steps.upstream.outputs.image_prefix }}/${{ matrix.image }}:${{ steps.prod-tags.outputs.edge_base }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ steps.upstream.outputs.image_prefix }}/${{ matrix.image }}:${{ steps.prod-tags.outputs.cache_ref }}
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ steps.upstream.outputs.image_prefix }}/${{ matrix.image }}:${{ steps.prod-tags.outputs.cache_ref }},mode=max
+
+      # =========================
+      # 🧪 非 main
+      # =========================
+      - name: Build and push (test)
+        if: github.ref != 'refs/heads/main'
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          push: true
+          build-args: |
+            UPSTREAM_VERSION=${{ steps.upstream.outputs.default_branch }}
+            UPSTREAM_SHA=${{ steps.upstream.outputs.sha }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
