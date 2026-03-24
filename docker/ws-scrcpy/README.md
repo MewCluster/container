@@ -6,7 +6,6 @@
 
 - 自动发现并连接 Android Pod（K8s）或静态 IP（Docker）
 - 监控设备变化，设备减少时自动重启 ws-scrcpy
-- 启动时等待至少一个设备就绪后再启动服务
 
 ## 使用
 
@@ -48,6 +47,7 @@ services:
 | `K8S_LABEL` | `app.kubernetes.io/name=android` | K8s Pod 筛选 label |
 | `K8S_API` | `https://kubernetes.default.svc` | K8s API 地址 |
 | `ADB_PORT` | `5555` | android ADB 端口 |
+| `HEALTH_PORT` | `18000` | HTTP 健康检查及日志端口 |
 | `WAIT_LIMIT` | `120` | 启动等待超时（秒） |
 | `RETRY_COUNT` | `3` | 单个设备就绪检测重试次数 |
 | `MONITOR_INTERVAL` | `10` | 设备变化监控间隔（秒） |

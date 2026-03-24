@@ -13,13 +13,18 @@ LABEL upstream-repo=NetrisTV/ws-scrcpy
 LABEL org.opencontainers.image.version="${UPSTREAM_VERSION}"
 LABEL org.opencontainers.image.revision="${UPSTREAM_SHA}"
 LABEL org.opencontainers.image.source="https://github.com/MewCluster/container"
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     android-tools-adb \
-    python3 python3-requests \
+    python3 \
     && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
-COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/package.json ./package.json
 COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package.json ./package.json
+COPY --from=builder /app/dist         ./dist
 COPY entrypoint.py /entrypoint.py
+
+EXPOSE 8080
+
 ENTRYPOINT ["python3", "/entrypoint.py"]
