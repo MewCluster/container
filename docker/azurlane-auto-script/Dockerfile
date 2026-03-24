@@ -21,7 +21,7 @@ RUN AV_VERSION=$(grep -E '^av==' /build/alas/requirements.txt | cut -d= -f3) \
     && conda clean -afy
 
 RUN /opt/alas_env/bin/pip install --no-cache-dir --upgrade pip setuptools wheel \
-    && grep -Ev '^(av|pywin32)==' /build/alas/requirements.txt \
+    && grep -Ev '^(av|pywin32|requests)==' /build/alas/requirements.txt \
         > /tmp/req_pip.txt \
     && /opt/alas_env/bin/pip install --no-cache-dir -r /tmp/req_pip.txt
 
