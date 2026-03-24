@@ -1,0 +1,94 @@
+name: Trigger Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: 'docker/ 下的子目录名'
+        required: true
+        type: string
+      variant:
+        description: '变体名，对应 <variant>.Dockerfile；留空表示默认构建'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+
+    permissions:
+      actions: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Validate inputs
+        run: | # shell
+          set -euo pipefail
+
+          IMAGE="${{ inputs.image }}"
+          VARIANT="${{ inputs.variant }}"
+
+          if [ -z "$VARIANT" ]; then
+            VARIANT="latest"
+          fi
+
+          if [ ! -d "docker/${IMAGE}" ]; then
+            echo "❌ docker/${IMAGE} 不存在"
+            echo "可用的 image："
+            ls docker/ | sed 's/^/  - /'
+            exit 1
+          fi
+
+          if [ "$VARIANT" = "latest" ]; then
+            FILE="docker/${IMAGE}/Dockerfile"
+          else
+            FILE="docker/${IMAGE}/${VARIANT}.Dockerfile"
+          fi
+
+          if [ ! -f "$FILE" ]; then
+            echo "❌ $FILE 不存在"
+            echo "docker/${IMAGE}/ 下可用的变体："
+            ls "docker/${IMAGE}/" | grep -E 'Dockerfile' | sed 's/^/  - /' | \
+              sed 's/Dockerfile/latest/' | \
+              sed 's/\.Dockerfile//'
+            exit 1
+          fi
+
+          echo "✅ image=${IMAGE} variant=${VARIANT} file=${FILE}"
+
+      - name: Dispatch build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: | # shell
+          set -euo pipefail
+
+          IMAGE="${{ inputs.image }}"
+          VARIANT="${{ inputs.variant }}"
+
+          if [ -z "$VARIANT" ]; then
+            VARIANT="latest"
+          fi
+
+          if [ "$VARIANT" = "latest" ]; then
+            FILE="docker/${IMAGE}/Dockerfile"
+          else
+            FILE="docker/${IMAGE}/${VARIANT}.Dockerfile"
+          fi
+
+          MATRIX=$(jq -cn \
+            --arg ctx "docker/${IMAGE}" \
+            --arg file "$FILE" \
+            --arg img "$IMAGE" \
+            --arg var "$VARIANT" \
+            --arg name "${IMAGE}:${VARIANT}" \
+            '[{context: $ctx, file: $file, image: $img, variant: $var, name: $name}]')
+
+          echo "Matrix: $MATRIX"
+
+          gh workflow run build.yaml \
+            --repo "${{ github.repository }}" \
+            --ref "${{ github.ref_name }}" \
+            --field "matrix_json=${MATRIX}"
