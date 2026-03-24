@@ -32,7 +32,7 @@ FROM debian:bookworm-slim
 ARG UPSTREAM_VERSION
 ARG UPSTREAM_SHA
 
-LABEL upstream-repo="LmeSzinc/AzurLaneAutoScript" \
+LABEL upstream-repo=LmeSzinc/AzurLaneAutoScript \
     org.opencontainers.image.version="${UPSTREAM_VERSION}" \
     org.opencontainers.image.revision="${UPSTREAM_SHA}" \
     org.opencontainers.image.source="https://github.com/MewCluster/container"
