@@ -1,5 +1,5 @@
 # ─── Stage 1: build conda env ────────────────────────────────────────────────
-FROM continuumio/miniconda3:25.9.1-3 AS builder
+FROM condaforge/miniforge3:25.3.0-3 AS builder
 
 ARG UPSTREAM_VERSION=master
 ARG REPO_URL=https://github.com/LmeSzinc/AzurLaneAutoScript.git
@@ -9,11 +9,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
+
 RUN git clone --depth=1 --branch "${UPSTREAM_VERSION}" "${REPO_URL}" alas
 
-RUN conda config --system --add channels conda-forge \
-    && conda config --system --set channel_priority strict \
-    && conda install -y -n base mamba \
+RUN conda config --system --set channel_priority strict \
     && conda clean -afy
 
 RUN AV_VERSION=$(grep -E '^av==' /build/alas/requirements.txt | cut -d= -f3) \
