@@ -1,6 +1,6 @@
 # container
 
-集群镜像仓库，仅适配 kubernetes。
+集群镜像仓库，详情参考 `docker` 下各个文件夹。
 
 ## 镜像标签
 
