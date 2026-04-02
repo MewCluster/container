@@ -144,7 +144,18 @@ def adb(*args, **kwargs) -> subprocess.CompletedProcess:
     return subprocess.run(["adb", *args], capture_output=True, text=True, **kwargs)
 
 
+def all_adb_ips() -> set[str]:
+    """返回 adb devices 中所有条目的 IP，包含 offline 设备，用于变更检测和 disconnect。"""
+    result = adb("devices")
+    ips = set()
+    for line in result.stdout.splitlines():
+        if f":{ADB_PORT}" in line:
+            ips.add(line.split(":")[0])
+    return ips
+
+
 def connected_ips() -> set[str]:
+    """返回当前在线（非 offline）设备的 IP，用于健康检查。"""
     result = adb("devices")
     ips = set()
     for line in result.stdout.splitlines():
@@ -180,10 +191,15 @@ def wait_for_any_device(pods: list[str]) -> bool:
 
 
 def sync_devices(new_ips: list[str]) -> bool:
+    """
+    将 adb 已知设备（含 offline）与期望的 Pod IP 列表对齐。
+    返回 True 表示有设备被移除（触发 node 重启）。
+    """
     new_set = set(new_ips)
-    curr_set = connected_ips()
+    curr_set = all_adb_ips()
 
-    for ip in curr_set - new_set:
+    lost = curr_set - new_set
+    for ip in lost:
         log.info(f"断开已消失的设备: {ip}")
         adb("disconnect", f"{ip}:{ADB_PORT}")
 
@@ -201,7 +217,7 @@ def sync_devices(new_ips: list[str]) -> bool:
                 except Exception as e:
                     log.warning(f"连接 {ip} 异常: {e}")
 
-    return bool(curr_set - new_set)
+    return bool(lost)
 
 
 def monitor():
@@ -213,7 +229,7 @@ def monitor():
 
         new_pods = get_pods()
 
-        if set(new_pods) != connected_ips():
+        if set(new_pods) != all_adb_ips():
             log.info("检测到设备变更，重新同步...")
             has_lost = sync_devices(new_pods)
             if has_lost and node_proc and node_proc.poll() is None:
