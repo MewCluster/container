@@ -220,6 +220,27 @@ def sync_devices(new_ips: list[str]) -> bool:
     return bool(lost)
 
 
+def kill_scrcpy_on_device(ip: str):
+    """杀掉设备上残留的 scrcpy server 进程，避免端口占用。"""
+    result = adb(
+        "-s", f"{ip}:{ADB_PORT}", "shell",
+        "ps -ef | grep scrcpy | grep -v grep | awk '{print $2}' | xargs -r kill -9",
+    )
+    if result.returncode == 0:
+        log.info(f"已清理 {ip} 上的 scrcpy 残留进程")
+    else:
+        log.warning(f"清理 {ip} scrcpy 进程失败（可能已无残留）: {result.stderr.strip()}")
+
+
+def kill_scrcpy_all():
+    """对所有已连接设备执行 scrcpy 残留清理。"""
+    ips = connected_ips()
+    if not ips:
+        return
+    with ThreadPoolExecutor(max_workers=max(len(ips), 1)) as ex:
+        ex.map(kill_scrcpy_on_device, ips)
+
+
 def monitor():
     global node_proc
     while not stop_event.is_set():
@@ -235,6 +256,7 @@ def monitor():
             if has_lost and node_proc and node_proc.poll() is None:
                 log.info("设备减少，触发 ws-scrcpy 重启")
                 restarting.set()
+                kill_scrcpy_all()
                 node_proc.terminate()
 
 
@@ -259,6 +281,7 @@ threading.Thread(target=monitor, daemon=True).start()
 
 log.info("启动 ws-scrcpy")
 while not stop_event.is_set():
+    kill_scrcpy_all()
     node_proc = subprocess.Popen(["node", NODE_ENTRY])
     restarting.clear()
     node_proc.wait()
