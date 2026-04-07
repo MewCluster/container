@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 
-RUN git clone --depth=1 --branch "${UPSTREAM_VERSION}" "${REPO_URL}" alas
+RUN git clone --depth=10 --branch "${UPSTREAM_VERSION}" "${REPO_URL}" alas
 
 RUN conda config --system --set channel_priority strict \
     && conda clean -afy
@@ -38,6 +38,7 @@ LABEL upstream-repo=LmeSzinc/AzurLaneAutoScript \
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         adb \
+        git \
         libgl1 \
         libglib2.0-0 \
         libgomp1 \
