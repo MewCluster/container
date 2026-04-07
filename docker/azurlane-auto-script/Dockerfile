@@ -36,7 +36,7 @@ LABEL upstream-repo=LmeSzinc/AzurLaneAutoScript \
     org.opencontainers.image.revision="${UPSTREAM_SHA}" \
     org.opencontainers.image.source="https://github.com/MewCluster/container"
 
-RUN apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get install -y --no-install-recommends \
         adb \
         git \
         libgl1 \
