@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 
-RUN git clone --depth=1 --branch "${UPSTREAM_VERSION}" "${REPO_URL}" alas
+RUN git clone --depth=10 --branch "${UPSTREAM_VERSION}" "${REPO_URL}" alas
 
 RUN conda config --system --set channel_priority strict \
     && conda clean -afy
@@ -36,8 +36,9 @@ LABEL upstream-repo=LmeSzinc/AzurLaneAutoScript \
     org.opencontainers.image.revision="${UPSTREAM_SHA}" \
     org.opencontainers.image.source="https://github.com/MewCluster/container"
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get install -y --no-install-recommends \
         adb \
+        git \
         libgl1 \
         libglib2.0-0 \
         libgomp1 \
