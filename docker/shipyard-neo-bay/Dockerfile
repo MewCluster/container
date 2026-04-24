@@ -2,7 +2,7 @@ FROM ghcr.io/astrbotdevs/shipyard-neo-bay:latest AS upstream
 
 FROM upstream AS builder
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
-RUN VIRTUAL_ENV=/app/.venv uv pip install asyncpg --no-cache
+RUN VIRTUAL_ENV=/app/.venv uv pip install "psycopg[binary]" --no-cache
 
 FROM upstream
 
